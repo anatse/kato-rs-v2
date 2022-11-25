@@ -1,0 +1,11 @@
+[workspace]
+resolver = "2"
+members = [
+    "kafka-lib",
+    "kato-rs",
+]
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
