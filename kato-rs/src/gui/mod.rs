@@ -444,8 +444,9 @@ impl KUI {
             .with_label("Validate server certificate");
         check_certs.deactivate();
 
-        let mut buttons = Flex::new(200, 0, 100, KUI::TAB_HEIGHT, "");
-        let space = Frame::new(0, 0, 200, 0, "");
+        // let mut buttons = Flex::new(200, 0, 100, KUI::TAB_HEIGHT, "");
+        // let space = Frame::new(0, 0, 200, 0, "");
+
         let mut test_button = Button::default()
             .with_size(100, KUI::TAB_HEIGHT)
             .with_label("Test connect");
@@ -455,12 +456,13 @@ impl KUI {
             .with_label("Save");
         save_button.deactivate();
 
-        buttons.set_size(&space, 200);
-        buttons.end();
+        // buttons.set_size(&space, 200);
+        // buttons.end();
 
         // Callback to enable/disable buttons
         let (c_name, c_bootstrap, c_protocol) = clones!(name, bootstrap, protocol);
         let (mut c_test_button, mut c_save_button) = clones!(test_button, save_button);
+
         name.set_callback(move |_| {
             if !c_name.value().is_empty()
                 && !c_bootstrap.value().is_empty()
