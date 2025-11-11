@@ -8,31 +8,65 @@ use std::{
 };
 use tokio::net::TcpStream;
 use tokio_rustls::{
-    rustls::{
-        client::ServerCertVerifier, Certificate, ClientConfig, PrivateKey, RootCertStore,
-        ServerName,
-    },
     TlsConnector,
+    rustls::{
+        RootCertStore,
+        client::ClientConfig,
+        pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime},
+    },
 };
 use tracing::debug;
 
 use super::{KafkaErrors, KafkaStream, PROTO_PLAIN, PROTO_SSL};
 
+use tokio_rustls::rustls::client::danger::{ServerCertVerified, ServerCertVerifier};
+
 /// Struct implies dangerous SSL configuration - empty certificate verifier
 #[derive(Debug, Clone, Copy)]
 struct Verifier {}
+
 impl ServerCertVerifier for Verifier {
     fn verify_server_cert(
         &self,
-        _end_entity: &Certificate,
-        _intermediates: &[Certificate],
-        server_name: &ServerName,
-        _scts: &mut dyn Iterator<Item = &[u8]>,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
         _ocsp_response: &[u8],
-        _now: std::time::SystemTime,
-    ) -> Result<tokio_rustls::rustls::client::ServerCertVerified, tokio_rustls::rustls::Error> {
-        debug!("Called dangerous verifier: {:?}", server_name);
-        Ok(tokio_rustls::rustls::client::ServerCertVerified::assertion())
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, tokio_rustls::rustls::Error> {
+        debug!("Called dangerous verifier");
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &tokio_rustls::rustls::DigitallySignedStruct,
+    ) -> Result<
+        tokio_rustls::rustls::client::danger::HandshakeSignatureValid,
+        tokio_rustls::rustls::Error,
+    > {
+        Ok(tokio_rustls::rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &tokio_rustls::rustls::DigitallySignedStruct,
+    ) -> Result<
+        tokio_rustls::rustls::client::danger::HandshakeSignatureValid,
+        tokio_rustls::rustls::Error,
+    > {
+        Ok(tokio_rustls::rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<tokio_rustls::rustls::SignatureScheme> {
+        tokio_rustls::rustls::crypto::aws_lc_rs::default_provider()
+            .signature_verification_algorithms
+            .supported_schemes()
+            .to_vec()
     }
 }
 
@@ -75,7 +109,7 @@ impl KafkaConfig {
                         return Err(KafkaErrors::ConfigError(
                             "For SSL protocol certificate and key files must be configured".into(),
                         )
-                        .into())
+                        .into());
                     }
                 },
                 other => {
@@ -83,7 +117,7 @@ impl KafkaConfig {
                         "Unknown protocol type: {}",
                         other
                     ))
-                    .into())
+                    .into());
                 }
             };
             KafkaConfig::ctor(hp, proto, verify_certs, cert, key, ca_certs)
@@ -115,43 +149,43 @@ impl KafkaConfig {
             debug!("Connected");
             if self.protocol == PROTO_PLAIN {
                 return Ok(KafkaStream::PlainText(stream));
-            } else {
-                if let (Some(cert), Some(key)) = (&self.cert, &self.key) {
-                    let certs = KafkaConfig::load_certs(cert)?;
-                    let pk = KafkaConfig::load_private_key(key)?;
-                    let config = if !self.verify_certs {
-                        ClientConfig::builder()
-                            .with_safe_defaults()
-                            .with_custom_certificate_verifier(Arc::new(Verifier {}))
-                            .with_single_cert(certs, pk)?
-                    } else {
-                        let mut root_store = RootCertStore::empty();
-                        if let Some(ca_certs) = &self.ca_certs {
-                            let root_certs = KafkaConfig::load_certs(ca_certs)?;
-                            for cert in &root_certs {
-                                root_store.add(cert)?;
-                            }
+            } else if let (Some(cert), Some(key)) = (&self.cert, &self.key) {
+                let certs = KafkaConfig::load_certs(cert)?;
+                let pk = KafkaConfig::load_private_key(key)?;
+                let config = if !self.verify_certs {
+                    ClientConfig::builder()
+                        .dangerous()
+                        .with_custom_certificate_verifier(Arc::new(Verifier {}))
+                        .with_client_auth_cert(certs, pk)?
+                } else {
+                    let mut root_store = RootCertStore::empty();
+                    if let Some(ca_certs) = &self.ca_certs {
+                        let root_certs = KafkaConfig::load_certs(ca_certs)?;
+                        for cert in &root_certs {
+                            root_store.add(cert.clone())?;
                         }
+                    }
 
-                        ClientConfig::builder()
-                            .with_safe_defaults()
-                            .with_root_certificates(root_store)
-                            .with_single_cert(certs, pk)?
-                    };
+                    ClientConfig::builder()
+                        .with_root_certificates(root_store)
+                        .with_client_auth_cert(certs, pk)?
+                };
 
-                    let rc_config = Arc::new(config.into());
-                    let config = TlsConnector::from(rc_config);
+                let rc_config = Arc::new(config);
+                let config = TlsConnector::from(rc_config);
 
-                    let domain_name = address
-                        .to_string()
-                        .chars()
-                        .take_while(|&ch| ch != ':')
-                        .collect::<String>();
-                    let domain = ServerName::try_from(domain_name.as_str())?;
-                    let tls_stream = config.connect(domain, stream).await?;
+                // For rustls 0.23+, create ServerName from the IP address string
+                let tls_stream = {
+                    let host_ip = address.ip().to_string();
+                    let server_name = ServerName::try_from(host_ip).map_err(|_| {
+                        tokio_rustls::rustls::Error::InvalidCertificate(
+                            tokio_rustls::rustls::CertificateError::BadEncoding,
+                        )
+                    })?;
+                    config.connect(server_name, stream).await?
+                };
 
-                    return Ok(KafkaStream::Tls(tls_stream));
-                }
+                return Ok(KafkaStream::Tls(Box::new(tls_stream)));
             }
         }
 
@@ -162,10 +196,10 @@ impl KafkaConfig {
     pub async fn connect(&self) -> Result<KafkaStream> {
         for bs in &self.bootstrap {
             let opt_socket_addr = bs.to_socket_addrs()?.next();
-            if let Some(socket_addr) = opt_socket_addr {
-                if let Ok(stream) = self.connect_to_broker(socket_addr).await {
-                    return Ok(stream);
-                }
+            if let Some(socket_addr) = opt_socket_addr
+                && let Ok(stream) = self.connect_to_broker(socket_addr).await
+            {
+                return Ok(stream);
             }
         }
 
@@ -173,26 +207,24 @@ impl KafkaConfig {
     }
 
     /// Load certificates from file
-    pub fn load_certs(filename: &str) -> Result<Vec<Certificate>> {
+    pub fn load_certs(filename: &str) -> Result<Vec<CertificateDer<'static>>> {
         let certfile = File::open(filename)?;
         let mut reader = BufReader::new(certfile);
-        Ok(rustls_pemfile::certs(&mut reader)
-            .unwrap()
-            .iter()
-            .map(|v| Certificate(v.clone()))
-            .collect())
+        let certs: Result<Vec<CertificateDer<'static>>, _> =
+            rustls_pemfile::certs(&mut reader).collect();
+        Ok(certs?)
     }
 
     /// Load private key from file
-    pub fn load_private_key(filename: &str) -> Result<PrivateKey> {
+    pub fn load_private_key(filename: &str) -> Result<PrivateKeyDer<'static>> {
         let keyfile = File::open(filename)?;
         let mut reader = BufReader::new(keyfile);
 
         loop {
             match rustls_pemfile::read_one(&mut reader)? {
-                Some(rustls_pemfile::Item::RSAKey(key)) => return Ok(PrivateKey(key)),
-                Some(rustls_pemfile::Item::PKCS8Key(key)) => return Ok(PrivateKey(key)),
-                Some(rustls_pemfile::Item::ECKey(key)) => return Ok(PrivateKey(key)),
+                Some(rustls_pemfile::Item::Pkcs1Key(key)) => return Ok(key.into()),
+                Some(rustls_pemfile::Item::Pkcs8Key(key)) => return Ok(key.into()),
+                Some(rustls_pemfile::Item::Sec1Key(key)) => return Ok(key.into()),
                 None => break,
                 _ => {}
             }

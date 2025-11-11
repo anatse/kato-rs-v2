@@ -4,26 +4,27 @@ version = "0.0.1"
 authors = ["Анатолий Семенцов <avsementsov.sbt@sberbank.ru>"]
 description = "Kafka tool rust edition"
 keywords = ["kafka", "tool"]
-edition = "2021"
+edition = "2024"
 
 [dependencies]
 kafka-lib = { path = "../kafka-lib" }
 tokio = { version = "1.22.0", features = ["full"]}
 anyhow = "1.0.66"
-thiserror = "1.0.37"
+thiserror = "2"
 byteorder = "1.4.3"
 tracing = "0.1.37"
 tracing-subscriber ={ version = "0.3", features = ["env-filter"]}
-tracing-appender = "*"
+tracing-appender = "0.2"
 
-sled = { version = "0", features = ["compression"] }
-dirs = "4"
+sled = { version = "1.0.0-alpha.124" }
+dirs = "6"
 serde = { version = "1", features = ["derive"] }
 serde_derive = "1"
-bson = "2"
+bson = { version = "3", features = ["serde"] }
+bincode = { version = "2", features = ["serde"]}
 
 # GUI
 fltk = { version = "1", features = ["fltk-bundled"] }
 
 [build-dependencies]
-fl2rust = "0.5.6"
+fl2rust = "0.7"

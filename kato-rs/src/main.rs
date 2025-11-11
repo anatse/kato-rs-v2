@@ -1,15 +1,17 @@
+#[allow(unused_imports)]
+#[allow(dead_code)]
 mod config;
 mod gui;
 
 use std::{sync::Arc, time::Duration};
-use tracing::info;
-use tracing_subscriber::{fmt, EnvFilter, Layer};
+use tracing_subscriber::{EnvFilter, Layer, fmt};
 
 use kafka_lib::{BrokerPool, DescribeAclsRequest, KafkaConfig, KafkaIsolationLevel};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
-use fltk::{prelude::*, *};
+#[macro_use]
+extern crate tracing;
 
 #[tokio::main]
 async fn main() {
@@ -22,8 +24,8 @@ async fn main() {
         .init();
 
     let config = config::Config::new().unwrap();
-    let mut kui = gui::KUI::new(config);
-    kui.run();
+    let mut kui = gui::Kui::new(config);
+    let _ = kui.run();
 
     const CERT_FILENAME: &str =
         "/Users/sbt-sementsov-av/projects/kafka-driver-rs/kafka-main/certs/audit2_kafka.cer";

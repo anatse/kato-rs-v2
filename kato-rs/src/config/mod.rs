@@ -1,3 +1,4 @@
+use bincode::{Decode, Encode};
 use kafka_lib::KafkaErrors;
 use serde::{Deserialize, Serialize};
 use sled::{Db, Tree};
@@ -6,7 +7,7 @@ use tracing::error;
 #[cfg(not(test))]
 use tracing::info;
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Decode, Encode)]
 /// Kafka Server configuration
 pub struct ServerConfig {
     pub bootstrap: Vec<String>,
@@ -17,7 +18,7 @@ pub struct ServerConfig {
     pub verify_certs: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Decode, Encode)]
 /// Topic Preference configuration
 pub struct TopicPreference {
     pub key_format: String,
@@ -25,7 +26,7 @@ pub struct TopicPreference {
     pub num_last_messages: u32,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Decode, Encode)]
 pub struct WindowPreference {
     pub x: i32,
     pub y: i32,
@@ -45,6 +46,7 @@ macro_rules! config_impl {
     ($pref_type:ty) => {
         impl $pref_type {
             fn read(db: &Tree) -> Vec<(String, Self)> {
+                let config = bincode::config::standard();
                 db.iter()
                     .filter_map(|v| match v {
                         Err(err) => {
@@ -53,9 +55,9 @@ macro_rules! config_impl {
                         }
                         Ok((key, value)) => match (
                             std::str::from_utf8(key.as_ref()),
-                            bson::from_reader(value.as_ref()),
+                            bincode::decode_from_slice::<Self, _>(value.as_ref(), config),
                         ) {
-                            (Ok(key), Ok(srv)) => Some((key.to_owned(), srv)),
+                            (Ok(key), Ok(srv)) => Some((key.to_owned(), srv.0)),
                             _ => None,
                         },
                     })
@@ -63,8 +65,13 @@ macro_rules! config_impl {
             }
 
             fn find<T: AsRef<str>>(db: &Tree, name: T) -> anyhow::Result<Self> {
+                let config = bincode::config::standard();
                 match db.get(name.as_ref()) {
-                    Ok(Some(value)) => bson::from_reader(value.as_ref()).map_err(From::from),
+                    Ok(Some(value)) => {
+                        bincode::decode_from_slice::<Self, _>(value.as_ref(), config)
+                            .map(|srv| srv.0)
+                            .map_err(From::from)
+                    }
                     Err(error) => Err(error.into()),
                     _ => Err(KafkaErrors::SomeError(format!(
                         "{} not found",
@@ -75,7 +82,8 @@ macro_rules! config_impl {
             }
 
             fn add<T: AsRef<str>>(&self, db: &Tree, name: T) -> anyhow::Result<()> {
-                let data = bson::to_vec(self)?;
+                let config = bincode::config::standard();
+                let data = bincode::encode_to_vec(self, config)?;
                 let _ = db.insert(name.as_ref(), data)?;
                 Ok(())
             }
@@ -96,10 +104,8 @@ config_impl!(WindowPreference);
 impl Config {
     #[cfg(test)]
     /// This function was defined only for test purposes. To develop use ::new() without parameters
-    pub fn new(home_dir: &str) -> anyhow::Result<Self> {
-        let config = sled::Config::default()
-            .path(format!("{}/.kato-rs", home_dir))
-            .use_compression(true);
+    pub fn test_new(home_dir: &str) -> anyhow::Result<Self> {
+        let config = sled::Config::default().path(format!("{}/.kato-rs", home_dir));
 
         let preferences = config.open()?;
 
@@ -111,7 +117,6 @@ impl Config {
         })
     }
 
-    #[cfg(not(test))]
     pub fn new() -> anyhow::Result<Self> {
         let home_dir = match dirs::home_dir() {
             Some(hd) => hd.to_str().unwrap().to_string(),
@@ -121,9 +126,7 @@ impl Config {
             }
         };
 
-        let config = sled::Config::default()
-            .path(format!("{}/.kato-rs", home_dir))
-            .use_compression(true);
+        let config = sled::Config::default().path(format!("{}/.kato-rs", home_dir));
 
         let preferences = config.open()?;
 
@@ -215,17 +218,17 @@ mod tests {
 
     #[test]
     fn test_open_db() {
-        match Config::new(HOME_DIR) {
+        match Config::test_new(HOME_DIR) {
             Ok(_) => {}
             Err(err) => {
-                assert!(false, "Error opening config db {:?}", err);
+                panic!("Error opening config db {:?}", err);
             }
         };
     }
 
     #[test]
     fn test_add_server() {
-        let cfg = Config::new(HOME_DIR);
+        let cfg = Config::test_new(HOME_DIR);
         assert!(cfg.is_ok());
         let cfg = cfg.unwrap();
 
@@ -240,7 +243,7 @@ mod tests {
         match cfg.add_server("test-server", server) {
             Ok(_) => {}
             Err(err) => {
-                assert!(false, "Error adding server {:?}", err);
+                panic!("Error adding server {:?}", err);
             }
         }
     }
@@ -248,7 +251,7 @@ mod tests {
     #[test]
     fn test_read_servers() {
         test_add_server();
-        let cfg = Config::new(HOME_DIR).unwrap();
+        let cfg = Config::test_new(HOME_DIR).unwrap();
         let servers = cfg.read_servers();
         assert!(!servers.is_empty());
         let found = servers.iter().find(|(name, _)| name == "test-server");
@@ -261,17 +264,17 @@ mod tests {
     #[test]
     fn test_delete_server() {
         test_add_server();
-        let cfg = Config::new(HOME_DIR).unwrap();
+        let cfg = Config::test_new(HOME_DIR).unwrap();
         match cfg.delete_server("test-server") {
             Ok(_) => {}
             Err(err) => {
-                assert!(false, "Error adding server {:?}", err);
+                panic!("Error adding server {:?}", err);
             }
         }
 
         // Check server exists
         match cfg.find_server("test-server") {
-            Ok(_) => assert!(false, "Server has not been deleted"),
+            Ok(_) => panic!("Server has not been deleted"),
             Err(err) => {
                 assert_eq!(
                     "Some error occurred: StoredConfig not found",
@@ -289,28 +292,28 @@ mod tests {
             num_last_messages: 500,
         };
 
-        let cfg = Config::new(HOME_DIR);
+        let cfg = Config::test_new(HOME_DIR);
         assert!(cfg.is_ok());
         let cfg = cfg.unwrap();
 
         if let Err(err) = cfg.add_topic_preference("test-topic", &pref) {
-            assert!(false, "Error adding topic reference: {}", err);
+            panic!("Error adding topic reference: {}", err);
         }
 
         let prefs = cfg.read_topic_preferences();
         assert_eq!(1, prefs.len());
 
         if let Err(err) = cfg.find_topic_preference("test-topic") {
-            assert!(false, "Error finding topic reference: {}", err);
+            panic!("Error finding topic reference: {}", err);
         }
 
         if let Err(err) = cfg.delete_topic_preference("test-topic") {
-            assert!(false, "Error deleting topic reference: {}", err);
+            panic!("Error deleting topic reference: {}", err);
         }
 
         // Check server exists
         match cfg.find_topic_preference("test-topic") {
-            Ok(_) => assert!(false, "Server has not been deleted"),
+            Ok(_) => panic!("Server has not been deleted"),
             Err(err) => {
                 assert_eq!(
                     "Some error occurred: TopicPreference not found",

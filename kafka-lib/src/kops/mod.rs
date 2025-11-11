@@ -47,7 +47,7 @@ pub enum KafkaErrors {
 #[derive(Debug)]
 pub enum KafkaStream {
     PlainText(TcpStream),
-    Tls(TlsStream<TcpStream>),
+    Tls(Box<TlsStream<TcpStream>>),
 }
 
 impl KafkaStream {
@@ -113,9 +113,9 @@ pub enum KafkaIsolationLevel {
     ReadCommitted,
 }
 
-impl Into<i8> for KafkaIsolationLevel {
-    fn into(self) -> i8 {
-        match self {
+impl From<KafkaIsolationLevel> for i8 {
+    fn from(val: KafkaIsolationLevel) -> i8 {
+        match val {
             KafkaIsolationLevel::ReadUncommitted => 0,
             KafkaIsolationLevel::ReadCommitted => 1,
         }
@@ -133,9 +133,9 @@ pub enum KafkaListOffsets {
     ForTime(i64),
 }
 
-impl Into<i64> for KafkaListOffsets {
-    fn into(self) -> i64 {
-        match self {
+impl From<KafkaListOffsets> for i64 {
+    fn from(val: KafkaListOffsets) -> i64 {
+        match val {
             KafkaListOffsets::Beginning => -2,
             KafkaListOffsets::End => -1,
             KafkaListOffsets::Stored => -1000,

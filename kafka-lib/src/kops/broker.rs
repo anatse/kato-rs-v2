@@ -1,32 +1,29 @@
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::HashMap,
     fmt::Debug,
     net::{SocketAddr, ToSocketAddrs},
-    sync::{atomic::AtomicI32, Arc},
+    sync::{Arc, atomic::AtomicI32},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use bytes::{Bytes, BytesMut};
 use kafka_protocol::{
     messages::{
+        ApiVersionsRequest, ApiVersionsResponse, BrokerId, CreateAclsRequest, CreateAclsResponse,
+        CreateTopicsRequest, CreateTopicsResponse, DeleteAclsRequest, DeleteAclsResponse,
+        DeleteTopicsRequest, DeleteTopicsResponse, DescribeAclsRequest, DescribeAclsResponse,
+        DescribeGroupsRequest, DescribeGroupsResponse, FetchRequest, FetchResponse, GroupId,
+        ListGroupsRequest, ListGroupsResponse, ListOffsetsRequest, ListOffsetsResponse,
+        MetadataRequest, MetadataResponse, OffsetFetchRequest, OffsetFetchResponse, ProduceRequest,
+        ProduceResponse, RequestHeader, ResponseHeader, TopicName,
         api_versions_response::ApiVersion,
-        create_topics_request::{CreatableTopic, CreateableTopicConfigBuilder},
-        fetch_request::{FetchPartition, FetchTopicBuilder},
-        list_offsets_request::{
-            ListOffsetsPartition, ListOffsetsPartitionBuilder, ListOffsetsTopicBuilder,
-        },
+        create_topics_request::{CreatableTopic, CreatableTopicConfig},
+        fetch_request::{FetchPartition, FetchTopic},
+        list_offsets_request::{ListOffsetsPartition, ListOffsetsTopic},
         offset_fetch_request::{
-            OffsetFetchRequestGroupBuilder, OffsetFetchRequestTopicBuilder,
-            OffsetFetchRequestTopicsBuilder,
+            OffsetFetchRequestGroup, OffsetFetchRequestTopic, OffsetFetchRequestTopics,
         },
-        produce_request, ApiVersionsRequest, ApiVersionsResponse, BrokerId, CreateAclsRequest,
-        CreateAclsResponse, CreateTopicsRequest, CreateTopicsResponse, DeleteAclsRequest,
-        DeleteAclsResponse, DeleteTopicsRequest, DeleteTopicsResponse, DescribeAclsRequest,
-        DescribeAclsResponse, DescribeGroupsRequest, DescribeGroupsResponse, FetchRequest,
-        FetchResponse, GroupId, ListGroupsRequest, ListGroupsResponse, ListOffsetsRequest,
-        ListOffsetsResponse, MetadataRequest, MetadataResponse, OffsetFetchRequest,
-        OffsetFetchResponse, ProduceRequest, ProduceResponse, RequestHeader, ResponseHeader,
-        TopicName,
+        produce_request,
     },
     protocol::{Decodable, Encodable, Request, StrBytes},
     records::{Record, RecordBatchEncoder, RecordEncodeOptions, TimestampType},
@@ -40,8 +37,8 @@ use tokio::{
 use tracing::{debug, error, info, warn};
 
 use super::{
-    config::KafkaConfig, versions::request_header_version, versions::response_header_version,
-    KafkaErrors, KafkaIsolationLevel, KafkaListOffsets, KafkaStream,
+    KafkaErrors, KafkaIsolationLevel, KafkaListOffsets, KafkaStream, config::KafkaConfig,
+    versions::request_header_version, versions::response_header_version,
 };
 
 /// Contains broker iinformation and essential functions
@@ -166,7 +163,7 @@ impl BrokerPool {
                         info!("Trying to clear brokers");
                         let ro_brokers = background_broker_handle.lock().await;
                         let now = Instant::now();
-                        for (_, broker) in &*ro_brokers {
+                        for broker in (*ro_brokers).values() {
                             if let Some(access_time) = broker.access_time {
                                 if now.duration_since(access_time) > idle_time {
                                     // Broker was accessed too long time ago. Close broker connection
@@ -205,41 +202,39 @@ impl BrokerPool {
 
         //brokers.clear();
         let mut new_brokers = HashMap::new();
-        md.brokers.iter().for_each(|(id, bmd)| {
-            let broker_id = **id;
-            match (bmd.host.to_string(), bmd.port as u16).to_socket_addrs() {
+        for broker in &md.brokers {
+            let broker_id = &broker.node_id;
+            match (broker.host.to_string(), broker.port as u16).to_socket_addrs() {
                 Err(err) => {
                     error!("Error converting to socket address: {:?}", err);
                 }
                 Ok(mut addr_iter) => {
-                    if let Some(_) = brokers.get(&broker_id) {
-                        new_brokers.insert(broker_id, brokers.remove(&broker_id).unwrap());
-                    } else {
-                        if let Some(addr) = addr_iter.next() {
-                            let found_idx = match brokers.iter().find(|(_, v)| v.address == addr) {
-                                Some((idx, _)) => *idx,
-                                _ => -1,
-                            };
+                    if brokers.get(&**broker_id).is_some() {
+                        new_brokers.insert(**broker_id, brokers.remove(&**broker_id).unwrap());
+                    } else if let Some(addr) = addr_iter.next() {
+                        let found_idx = match brokers.iter().find(|(_, v)| v.address == addr) {
+                            Some((idx, _)) => *idx,
+                            _ => -1,
+                        };
 
-                            if found_idx != -1 {
-                                new_brokers.insert(broker_id, brokers.remove(&found_idx).unwrap());
-                            } else {
-                                new_brokers.insert(
-                                    broker_id,
-                                    Broker {
-                                        address: addr,
-                                        broker_id,
-                                        stream: Mutex::new(None),
-                                        access_time: None,
-                                        config: self.config.clone(),
-                                    },
-                                );
-                            }
+                        if found_idx != -1 {
+                            new_brokers.insert(**broker_id, brokers.remove(&found_idx).unwrap());
+                        } else {
+                            new_brokers.insert(
+                                **broker_id,
+                                Broker {
+                                    address: addr,
+                                    broker_id: **broker_id,
+                                    stream: Mutex::new(None),
+                                    access_time: None,
+                                    config: self.config.clone(),
+                                },
+                            );
                         }
                     }
                 }
-            };
-        });
+            }
+        }
 
         *brokers = new_brokers;
     }
@@ -256,19 +251,17 @@ impl BrokerPool {
     /// Get leader broker id for topic and partition, using loaded metadata
     pub fn get_leader_for_topic(&self, topic: &TopicName, partition: i32) -> anyhow::Result<i32> {
         if let Some(md) = &self.metadata {
-            let found = md
-                .topics
-                .get(topic)
-                .iter()
-                .filter_map(|md| {
-                    md.partitions
-                        .iter()
-                        .find(|p| p.partition_index == partition)
-                        .map(|p| *p.leader_id)
-                })
-                .collect::<Vec<i32>>();
-            if found.len() == 1 {
-                Ok(found[0])
+            let topic_found = md.topics.iter().find(|t| t.name.as_ref() == Some(topic));
+            if let Some(topic_data) = topic_found {
+                if let Some(partition_data) = topic_data
+                    .partitions
+                    .iter()
+                    .find(|p| p.partition_index == partition)
+                {
+                    Ok(*partition_data.leader_id)
+                } else {
+                    Err(KafkaErrors::PartitionNotFound(partition, topic.to_string()).into())
+                }
             } else {
                 Err(KafkaErrors::PartitionNotFound(partition, topic.to_string()).into())
             }
@@ -278,12 +271,7 @@ impl BrokerPool {
     }
 
     pub async fn get_broker_indexes(&self) -> Vec<i32> {
-        self.brokers
-            .lock()
-            .await
-            .iter()
-            .map(|(idx, _)| *idx)
-            .collect()
+        self.brokers.lock().await.keys().copied().collect()
     }
 
     pub fn metadata(&self) -> &Option<MetadataResponse> {
@@ -369,7 +357,7 @@ impl BrokerPool {
     /// Convert nonstatic reference to string to StrBytes
     /// This function uses unsafe operation because depends on StrBytes type
     fn to_strbytes<T: AsRef<str>>(value: T) -> StrBytes {
-        unsafe { StrBytes::from_utf8_unchecked(Bytes::from(value.as_ref().as_bytes().to_vec())) }
+        StrBytes::from_string(value.as_ref().to_string())
     }
 
     /// Map kafka protool error to KafkaError and furter to anyhow error
@@ -399,7 +387,7 @@ impl BrokerPool {
         let mut req_header = RequestHeader::default();
         req_header.request_api_version = api_version;
         req_header.request_api_key = api_key.into();
-        req_header.client_id = Some(StrBytes::from_str(&client_id));
+        req_header.client_id = Some(StrBytes::from_static_str(client_id));
         req_header.correlation_id = self
             .correlation
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -467,8 +455,8 @@ impl BrokerPool {
     /// Get api versions from kafka broker
     pub async fn get_api_ver(&mut self) -> anyhow::Result<(ResponseHeader, ApiVersionsResponse)> {
         let mut ver = ApiVersionsRequest::default();
-        ver.client_software_version = StrBytes::from_str("1.0");
-        ver.client_software_name = StrBytes::from_str(self.client_id);
+        ver.client_software_version = StrBytes::from_static_str("1.0");
+        ver.client_software_name = StrBytes::from_static_str(self.client_id);
         match self._get_api_ver(&ver, 3, 0).await {
             Ok(res) => Ok(res),
             Err(_) => self._get_api_ver(&ver, 0, -1).await,
@@ -569,13 +557,18 @@ impl BrokerPool {
             version: 2,
             compression: kafka_protocol::records::Compression::Gzip,
         };
-        RecordBatchEncoder::encode(&mut buf, vec![record].iter(), &opts)
+        RecordBatchEncoder::encode(&mut buf, [record].iter(), &opts)
             .map_err(BrokerPool::map_proto_err)?;
         pd.index = 0;
         pd.records = Some(buf.into());
         td.partition_data = vec![pd];
 
-        rq.topic_data.insert(topic_name, td);
+        // Assuming topic_data is a Vec of some TopicProduceData structure
+        // Create the appropriate structure instead of using insert
+        let mut topic_entry = produce_request::TopicProduceData::default();
+        topic_entry.name = topic_name;
+        topic_entry.partition_data = td.partition_data; // reuse the data we already created
+        rq.topic_data.push(topic_entry);
         self._produce(&rq, self.get_version(ProduceRequest::KEY)?.max_version, -1)
             .await
     }
@@ -595,25 +588,27 @@ impl BrokerPool {
             let topics = topic
                 .iter()
                 .map(|t| TopicName(BrokerPool::to_strbytes(t)))
-                .filter_map(|tn| md.topics.get(&tn).map(|tmd| (tn, tmd)))
-                .filter_map(|(tn, tmd)| {
-                    FetchTopicBuilder::default()
-                        .topic(tn)
-                        .topic_id(tmd.topic_id.clone())
-                        .partitions(
-                            tmd.partitions
-                                .iter()
-                                .map(|p| {
-                                    let mut par = FetchPartition::default();
-                                    par.partition = p.partition_index;
-                                    par.fetch_offset = fetch_offset;
-                                    par
-                                })
-                                .collect(),
-                        )
-                        .unknown_tagged_fields(BTreeMap::new())
-                        .build()
-                        .ok()
+                .filter_map(|tn| {
+                    md.topics
+                        .iter()
+                        .find(|topic| topic.name.as_ref() == Some(&tn))
+                        .map(|tmd| (tn, tmd))
+                })
+                .map(|(tn, tmd)| {
+                    let mut fetch_topic = FetchTopic::default();
+                    fetch_topic.topic = tn;
+                    fetch_topic.topic_id = tmd.topic_id;
+                    fetch_topic.partitions = tmd
+                        .partitions
+                        .iter()
+                        .map(|p| {
+                            let mut par = FetchPartition::default();
+                            par.partition = p.partition_index;
+                            par.fetch_offset = fetch_offset;
+                            par
+                        })
+                        .collect();
+                    fetch_topic
                 })
                 .collect::<Vec<_>>();
 
@@ -647,22 +642,15 @@ impl BrokerPool {
         let leader = self.get_leader_for_topic(&topic_name, partition)?;
 
         let mut rq = ListOffsetsRequest::default();
-        let topic = ListOffsetsTopicBuilder::default()
-            .name(topic_name)
-            .partitions(vec![ListOffsetsPartitionBuilder::default()
-                .partition_index(partition)
-                .max_num_offsets(1)
-                .timestamp(timestamp.into())
-                .current_leader_epoch(-1)
-                .unknown_tagged_fields(Default::default())
-                .build()
-                .unwrap_or_else(|e| {
-                    debug!("Error build partition {:?}", e);
-                    let pd = ListOffsetsPartition::default();
-                    pd
-                })])
-            .unknown_tagged_fields(Default::default())
-            .build()?;
+        let mut topic = ListOffsetsTopic::default();
+        topic.name = topic_name;
+
+        let mut partition_data = ListOffsetsPartition::default();
+        partition_data.partition_index = partition;
+        partition_data.timestamp = timestamp.into();
+        partition_data.current_leader_epoch = -1;
+
+        topic.partitions = vec![partition_data];
 
         rq.topics = vec![topic];
         rq.isolation_level = isolation_level.into();
@@ -704,11 +692,10 @@ impl BrokerPool {
     ) -> anyhow::Result<(ResponseHeader, OffsetFetchResponse)> {
         let mut rq = OffsetFetchRequest::default();
         let topic_name = TopicName(BrokerPool::to_strbytes(topic));
-        let topic = vec![OffsetFetchRequestTopicBuilder::default()
-            .name(topic_name.clone())
-            .partition_indexes(partitions.to_vec())
-            .unknown_tagged_fields(Default::default())
-            .build()?];
+        let mut offset_topic = OffsetFetchRequestTopic::default();
+        offset_topic.name = topic_name.clone();
+        offset_topic.partition_indexes = partitions.to_vec();
+        let topic = vec![offset_topic];
 
         rq.topics = Some(topic);
         rq.require_stable = true;
@@ -716,13 +703,18 @@ impl BrokerPool {
         if version > 7 {
             rq.group_id = GroupId(BrokerPool::to_strbytes(group_id));
         } else {
-            rq.groups = vec![OffsetFetchRequestGroupBuilder::default()
-                .topics(Some(vec![OffsetFetchRequestTopicsBuilder::default()
-                    .name(topic_name)
-                    .partition_indexes(partitions.to_vec())
-                    .unknown_tagged_fields(Default::default())
-                    .build()?]))
-                .build()?];
+            let mut group_topic = OffsetFetchRequestTopics::default();
+            group_topic.name = topic_name;
+            group_topic.partition_indexes = partitions.to_vec();
+            group_topic.topic_id = Default::default(); // Will use None by default
+
+            let mut group = OffsetFetchRequestGroup::default();
+            group.topics = Some(vec![group_topic]);
+            group.group_id = Default::default();
+            group.member_id = Default::default();
+            group.member_epoch = Default::default();
+            group.unknown_tagged_fields = Default::default();
+            rq.groups = vec![group];
         }
 
         self._offset_fetch(&rq, version, -1).await
@@ -743,18 +735,28 @@ impl BrokerPool {
         topic.num_partitions = partition_count;
         topic.replication_factor = replica_count;
         for (k, v) in configs {
-            let config = CreateableTopicConfigBuilder::default()
-                .value(if v.as_ref().is_empty() {
-                    None
-                } else {
-                    Some(BrokerPool::to_strbytes(v))
-                })
-                .unknown_tagged_fields(Default::default())
-                .build()?;
-            topic.configs.insert(BrokerPool::to_strbytes(k), config);
+            let mut config = CreatableTopicConfig::default();
+            config.name = BrokerPool::to_strbytes(k);
+            config.value = if v.as_ref().is_empty() {
+                None
+            } else {
+                Some(BrokerPool::to_strbytes(v))
+            };
+            // Removed config_source field as it doesn't exist in this version
+            // config.config_source = Default::default();
+
+            topic.configs.push(config);
         }
 
-        rq.topics.insert(topic_name, topic);
+        // Assuming topics is a Vec instead of HashMap
+        // Create the appropriate structure containing the topic name and the topic data
+        // Need to understand the structure better - maybe the topic needs to be wrapped differently
+        // Looking at the error, topics is a Vec, not a HashMap
+        // So we need to create a structure containing topic name and topic data
+        // Actually, the topic was already created with the name
+        // Let me directly push the topic since topic.name already contains topic_name
+        topic.name = topic_name; // set the name field of the creatable topic
+        rq.topics.push(topic);
         let version = self.get_version(CreateTopicsRequest::KEY)?.max_version;
         self._create_topic(&rq, version, -1).await
     }

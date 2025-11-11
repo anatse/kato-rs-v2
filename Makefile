@@ -3,6 +3,10 @@ prog = kato-rs
 test:
 	cargo test -- --test-threads=1
 
+check:
+	cargo fmt --all -- --check
+	cargo clippy --all --all-targets -- -D clippy::all -Dwarnings
+
 build:
 	cargo build $(release)
 

@@ -46,7 +46,7 @@ pub(crate) enum Message {
     ShowAlert(String),
     /// Add server to configuration database and tree control
     AddServer(String, ServerConfig),
-    /// Add server tab 
+    /// Add server tab
     AddServerTab(String),
     /// Add server information to tree control
     FillServersTree(Metadata),
@@ -68,7 +68,7 @@ pub(crate) struct ServerInfo {
 }
 
 /// Gui configuration and states
-pub struct KUI {
+pub struct Kui {
     // Configuration
     pub(crate) config: config::Config,
     pub(crate) servers: HashMap<String, ServerConfig>,
@@ -78,7 +78,7 @@ pub struct KUI {
     pub(crate) sender: Option<Sender<Message>>,
 }
 
-impl KUI {
+impl Kui {
     const WINDOW_NAME: &str = "KUI";
     const TAB_HEIGHT: i32 = 30;
     const MARGIN: i32 = 3;
@@ -108,7 +108,7 @@ impl KUI {
                 if let Some(mut item) = item {
                     // item.set_label_color(Color::from_rgb(255, 0, 0));
                     let image = include_bytes!("images/red_circle.jpeg");
-                    if let Some(mut img) = JpegImage::from_data(image).ok() {
+                    if let Ok(mut img) = JpegImage::from_data(image) {
                         img.scale(16, 16, true, false);
                         item.set_user_icon(Some(img));
                     }
@@ -120,7 +120,7 @@ impl KUI {
 
     /// Loads window preferences from database and move/resize main window
     fn load_window_preferences(&self, wnd: &mut DoubleWindow) {
-        match self.config.find_window_preference(KUI::WINDOW_NAME) {
+        match self.config.find_window_preference(Kui::WINDOW_NAME) {
             Ok(wp) => {
                 wnd.set_size(wp.width, wp.height);
                 wnd.set_pos(wp.x, wp.y);
@@ -131,7 +131,7 @@ impl KUI {
 
     /// Save window preferences into configuration database
     fn save_window_preference(&self, pref: WindowPreference) -> anyhow::Result<()> {
-        self.config.add_window_preference(KUI::WINDOW_NAME, &pref)
+        self.config.add_window_preference(Kui::WINDOW_NAME, &pref)
     }
 
     /// Main UI loop. This function processes all messages from UI callbacks or from asynchronous functions.
@@ -141,8 +141,8 @@ impl KUI {
     pub fn run(&mut self) -> anyhow::Result<()> {
         let app = app::App::default().with_scheme(app::Scheme::Base);
         let (sender, receiver) = app::channel::<Message>();
-        self.sender = Some(sender.clone());
-        let mut wind = self.make_window(sender.clone());
+        self.sender = Some(sender);
+        let mut wind = self.make_window(sender);
 
         // Process messages
         while app.wait() {
@@ -263,26 +263,22 @@ impl KUI {
             }
         }
 
-        
         // Save preference after main loop has been interrupted
-        match receiver.recv() {
-            // Store window preferences and exit
-            Some(Message::SaveWindowPreferences(x, y, w, h)) => {
-                warn!("Receive save preference message");
-                match self.save_window_preference(WindowPreference {
-                    x,
-                    y,
-                    width: w,
-                    height: h,
-                }) {
-                    Ok(_) => info!(
-                        "Successfully stored window preferences: {}/{}/{}/{}",
-                        x, y, w, h
-                    ),
-                    Err(err) => warn!("Error storing window preferences: {:?}", err),
-                }
+        // Store window preferences and exit
+        if let Some(Message::SaveWindowPreferences(x, y, w, h)) = receiver.recv() {
+            warn!("Receive save preference message");
+            match self.save_window_preference(WindowPreference {
+                x,
+                y,
+                width: w,
+                height: h,
+            }) {
+                Ok(_) => info!(
+                    "Successfully stored window preferences: {}/{}/{}/{}",
+                    x, y, w, h
+                ),
+                Err(err) => warn!("Error storing window preferences: {:?}", err),
             }
-            _ => {}
         }
 
         Ok(())
@@ -319,7 +315,7 @@ impl KUI {
 
         self.load_window_preferences(&mut wind);
         wind.make_resizable(true);
-        let snd = sender.clone();
+        let snd = sender;
         wind.handle(move |wnd, ev| {
             if ev.bits() == Event::Close.bits() || ev.bits() == Event::Hide.bits() {
                 info!("Handle window close event");
@@ -340,24 +336,24 @@ impl KUI {
 
         let mut tree = Tree::default().with_align(enums::Align::Inside | enums::Align::Right);
         self.tree = Some(tree.clone());
-        self.handle_tree_selection(sender.clone());
+        self.handle_tree_selection(sender);
 
         tree.set_show_root(false);
         tree.set_connector_style(fltk::tree::TreeConnectorStyle::Dotted);
         tree.set_item_draw_mode(TreeItemDrawMode::LabelAndWidget);
 
-        rows.set_size(&tree, 300);
+        rows.fixed(&tree, 300);
 
         let mut tab = Tabs::new(0, 0, 500, 450, "");
         self.main_tab = Some(tab.clone());
 
         let grp2 = Group::default_fill().with_label("Welcome");
 
-        KUI::draw_welcome_page(&sender);
+        Kui::draw_welcome_page(&sender);
 
         grp2.end();
 
-        tab.resize_callback(KUI::tab_resize_callback);
+        tab.resize_callback(Kui::tab_resize_callback);
 
         tab.end();
 
@@ -375,14 +371,19 @@ impl KUI {
         let children = widget.children();
         for idx in 0..children {
             if let Some(mut child) = widget.child(idx) {
-                child.resize(x + KUI::MARGIN, y + KUI::TAB_HEIGHT, w - x - KUI::MARGIN, h - KUI::TAB_HEIGHT);
+                child.resize(
+                    x + Kui::MARGIN,
+                    y + Kui::TAB_HEIGHT,
+                    w - x - Kui::MARGIN,
+                    h - Kui::TAB_HEIGHT,
+                );
             }
         }
     }
 
     /// Create file browser widget with browse button
     fn browse_widget(width: i32, title: &str, pattern: &str, activated: bool) -> Output {
-        let mut flex = Flex::default().with_size(width, KUI::TAB_HEIGHT);
+        let mut flex = Flex::default().with_size(width, Kui::TAB_HEIGHT);
         let mut file_pem = Output::default()
             .with_size(0, 30)
             .with_label(title)
@@ -392,9 +393,9 @@ impl KUI {
         }
 
         let mut browse_button = Button::default()
-            .with_size(100, KUI::TAB_HEIGHT)
+            .with_size(100, Kui::TAB_HEIGHT)
             .with_label("@fileopen");
-        flex.set_size(&browse_button, 30);
+        flex.fixed(&browse_button, 30);
         flex.end();
 
         let title_s = title.to_string();
@@ -421,23 +422,23 @@ impl KUI {
         _fmt.set_label_font(Font::Courier);
 
         let mut name = Input::default()
-            .with_size(0, KUI::TAB_HEIGHT)
+            .with_size(0, Kui::TAB_HEIGHT)
             .with_label("Server name:")
             .with_align(Align::Left);
         let mut bootstrap = Input::default()
-            .with_size(0, KUI::TAB_HEIGHT)
+            .with_size(0, Kui::TAB_HEIGHT)
             .with_label("Bootstrap:")
             .with_align(Align::Left);
         let mut protocol = Choice::default()
-            .with_size(0, KUI::TAB_HEIGHT)
+            .with_size(0, Kui::TAB_HEIGHT)
             .with_label("Protocol:")
             .with_align(Align::Left);
         protocol.add_choice("plaintext");
         protocol.add_choice("ssl");
 
-        let cert = KUI::browse_widget(100, "Certificate (PEM):", "PEM Files (*.pem)", false);
-        let key = KUI::browse_widget(100, "Key (cer):", "Key Files (*.cer)", false);
-        let ca_cert = KUI::browse_widget(100, "CA certs (PEM):", "PEM Files (*.pem)", false);
+        let cert = Kui::browse_widget(100, "Certificate (PEM):", "PEM Files (*.pem)", false);
+        let key = Kui::browse_widget(100, "Key (cer):", "Key Files (*.cer)", false);
+        let ca_cert = Kui::browse_widget(100, "CA certs (PEM):", "PEM Files (*.pem)", false);
 
         let mut check_certs = CheckButton::default()
             .with_size(0, 30)
@@ -448,11 +449,11 @@ impl KUI {
         // let space = Frame::new(0, 0, 200, 0, "");
 
         let mut test_button = Button::default()
-            .with_size(100, KUI::TAB_HEIGHT)
+            .with_size(100, Kui::TAB_HEIGHT)
             .with_label("Test connect");
         test_button.deactivate();
         let mut save_button = Button::default()
-            .with_size(100, KUI::TAB_HEIGHT)
+            .with_size(100, Kui::TAB_HEIGHT)
             .with_label("Save");
         save_button.deactivate();
 
@@ -519,7 +520,7 @@ impl KUI {
 
         let (c_bootstrap, c_protocol, c_check_certs, c_cert, c_key, c_ca_cert) =
             clones!(bootstrap, protocol, check_certs, cert, key, ca_cert);
-        let snd = sender.clone();
+        let snd = *sender;
         test_button.set_callback(move |_| {
             let bs = c_bootstrap.value();
             let proto = match c_protocol.value() {
@@ -541,7 +542,7 @@ impl KUI {
                 .and_then(|p| p.into_os_string().into_string().ok());
             match KafkaConfig::new(bs, proto, varify_certs, certificate, key, ca) {
                 Ok(cfg) => {
-                    let snd = snd.clone();
+                    let snd = snd;
                     tokio::spawn(async move {
                         match cfg.connect().await {
                             Ok(_) => {
@@ -561,7 +562,7 @@ impl KUI {
 
         let (c_name, c_bootstrap, c_protocol, c_check_certs, c_cert, c_key, c_ca_cert) =
             clones!(name, bootstrap, protocol, check_certs, cert, key, ca_cert);
-        let snd = sender.clone();
+        let snd = *sender;
         save_button.set_callback(move |_| {
             let server_name = c_name.value();
             let bs = c_bootstrap.value();
