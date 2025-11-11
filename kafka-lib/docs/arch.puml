@@ -1,6 +1,181 @@
-@startuml "architecture"
+@startuml "kafka-lib Architecture"
 
-tes -> t2
-t2 -> t3
+package "kafka-lib" {
+
+  interface KafkaOperations {
+    produce()
+    fetch_from_topics()
+    create_topic()
+    delete_topic()
+    list_offsets()
+    get_watermarks()
+    offset_fetch()
+    describe_acl()
+    create_acl()
+    delete_acls()
+    list_groups()
+    describe_groups()
+  }
+
+  class BrokerPool {
+    - config: Arc<KafkaConfig>
+    - brokers: Arc<Mutex<HashMap<i32, Broker>>>
+    - idle_task: JoinHandle<()>
+    - client_id: &'static str
+    - correlation: AtomicI32
+    - metadata: Option<MetadataResponse>
+    - api_ver: Option<ApiVersionsResponse>
+    
+    + new(): BrokerPool
+    + init(): Result<()>
+    + update_metadata()
+    + get_version(): Result<&ApiVersion>
+    + get_leader_for_topic(): Result<i32>
+    + get_api_ver(): Result<(ResponseHeader, ApiVersionsResponse)>
+    + get_metadata(): Result<(ResponseHeader, MetadataResponse)>
+    + produce(): Result<(ResponseHeader, ProduceResponse)>
+    + fetch_from_topics(): Result<(ResponseHeader, FetchResponse)>
+    + create_topic(): Result<(ResponseHeader, CreateTopicsResponse)>
+    + delete_topic(): Result<(ResponseHeader, DeleteTopicsResponse)>
+    + list_offsets(): Result<(ResponseHeader, ListOffsetsResponse)>
+    + get_watermarks(): Result<(i64, i64)>
+    + offset_fetch(): Result<(ResponseHeader, OffsetFetchResponse)>
+    + describe_acl(): Result<(ResponseHeader, DescribeAclsResponse)>
+    + create_acl(): Result<(ResponseHeader, CreateAclsResponse)>
+    + delete_acls(): Result<(ResponseHeader, DeleteAclsResponse)>
+    + list_groups(): Result<Vec<(ResponseHeader, ListGroupsResponse)>>
+    + describe_groups(): Result<Vec<(ResponseHeader, DescribeGroupsResponse)>>
+    + refresh_metadata(): Result<()>
+    + get_broker_indexes(): Vec<i32>
+    + metadata(): &Option<MetadataResponse>
+  }
+
+  class Broker {
+    - address: SocketAddr
+    - broker_id: i32
+    - stream: Mutex<Option<KafkaStream>>
+    - access_time: Option<Instant>
+    - config: Arc<KafkaConfig>
+    
+    + connect(): Result<()>
+    + disconnect()
+    + write_i32(): Result<()>
+    + write_all(): Result<()>
+    + read_i32(): Result<i32>
+    + read_exact(): Result<usize>
+  }
+
+  class KafkaConfig {
+    - bootstrap: Vec<String>
+    - cert: Option<String>
+    - key: Option<String>
+    - ca_certs: Option<String>
+    - protocol: i16
+    - verify_certs: bool
+    
+    + new(): Result<Self>
+    + connect(): Result<KafkaStream>
+    + connect_to_broker(): Result<KafkaStream>
+    + load_certs(): Result<Vec<CertificateDer>>
+    + load_private_key(): Result<PrivateKeyDer>
+  }
+
+  class KafkaStream {
+    + PlainText(TcpStream)
+    + Tls(Box<TlsStream<TcpStream>>)
+    
+    + addr(): Result<SocketAddr>
+    + write_i32(): Result<()>
+    + write_all(): Result<()>
+    + read_i32(): Result<i32>
+    + read_exact(): Result<usize>
+  }
+
+  class KafkaErrors {
+    + SomeError(String)
+    + ConfigError(String)
+    + ConnectError
+    + LoadCertError(String)
+    + NotInitialized
+    + TopicNotFound
+    + BrokerNotFound
+    + PartitionNotFound(i32, String)
+  }
+
+  class KafkaIsolationLevel {
+    + ReadUncommitted
+    + ReadCommitted
+  }
+
+  class KafkaListOffsets {
+    + Beginning
+    + End
+    + Stored
+    + Invalid
+    + TailBase
+    + ForTime(i64)
+  }
+
+  class "kafka-protocol" as kafka_protocol {
+    Messages (APIs)
+    Protocol encoding
+    Records handling
+  }
+
+  class "tokio" as tokio_lib {
+    Async runtime
+    TCP streams
+    Sync primitives
+  }
+
+  class "tokio-rustls" as tokio_rustls_lib {
+    TLS implementation
+    Certificate handling
+  }
+
+  ' Relationships
+  BrokerPool <|-- KafkaOperations
+  BrokerPool --> Broker : manages
+  BrokerPool --> KafkaConfig
+  BrokerPool --> kafka_protocol
+  BrokerPool --> tokio_lib
+  BrokerPool --> KafkaErrors
+
+  Broker --> KafkaStream
+  Broker --> KafkaConfig
+  Broker --> tokio_lib
+
+  KafkaConfig --> tokio_rustls_lib
+  KafkaConfig --> KafkaStream
+  KafkaConfig --> KafkaErrors
+
+  KafkaStream --> tokio_lib
+  KafkaStream --> tokio_rustls_lib
+
+  BrokerPool --> KafkaIsolationLevel
+  BrokerPool --> KafkaListOffsets
+
+  kafka_protocol <|-- KafkaOperations
+  tokio_lib --> BrokerPool
+  tokio_rustls_lib --> KafkaStream
+}
+
+note top of BrokerPool
+  Manages a pool of Kafka brokers and
+  provides high-level API operations
+  to interact with Kafka cluster
+end note
+
+note right of Broker
+  Represents a single Kafka broker
+  connection with methods to read/
+  write data using Kafka protocol
+end note
+
+note bottom of KafkaConfig
+  Configuration for Kafka connection
+  including protocol settings,
+  certificates, and bootstrap servers
+end note
 
 @enduml

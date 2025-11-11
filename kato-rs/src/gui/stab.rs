@@ -1,3 +1,5 @@
+use std::{sync::Arc, time::Duration};
+
 /// Module contains function to create and manipulate server tab
 use fltk::{
     button::Button,
@@ -7,9 +9,10 @@ use fltk::{
     prelude::{GroupExt, WidgetBase, WidgetExt},
 };
 
+use kafka_lib::{BrokerPool, KafkaConfig};
 use tracing::info;
 
-use crate::gui::{Message, Metadata};
+use crate::gui::{Message, Metadata, ServerInfo};
 
 use super::Kui;
 
@@ -163,58 +166,75 @@ impl Kui {
                 }
             });
 
-            // let _ = self.servers.get(server_name).and_then(|sc| {
-            //     KafkaConfig::ctor(sc.bootstrap.clone(), sc.protocol, sc.verify_certs.clone(), sc.cert.clone(), sc.key.clone(), sc.ca_certs.clone()).ok()
-            // }).and_then(|kc| {
-            //     Some(BrokerPool::new(Arc::new(kc), Duration::from_secs(30), "kafka-tool"))
-            // }).map(|mut broker_pool| {
-            //     let broker_pools = self.broker_pools.clone();
-            //     tokio::spawn(async move {
-            //         match broker_pool.init().await {
-            //             Ok(_) => {
-            //                 info!("Successfully connected");
-            //                 if let Some(mdr) = broker_pool.metadata() {
-            //                     let brokers = mdr
-            //                         .brokers
-            //                         .iter()
-            //                         .map(|(_, bmd)| {
-            //                             format!("{}:{}", bmd.host, bmd.port)
-            //                         })
-            //                         .collect();
-            //                     let topics = mdr
-            //                         .topics
-            //                         .iter()
-            //                         .map(|(topic, _)| topic.to_string())
-            //                         .collect();
-            //                     snd.send(Message::FillServersTree(
-            //                         Metadata {
-            //                             server_name: sname.clone(),
-            //                             brokers,
-            //                             topics,
-            //                         },
-            //                     ));
-            //                 }
+            let sname = server_name.to_string();
+            let _ = self
+                .servers
+                .get(server_name)
+                .and_then(|sc| {
+                    KafkaConfig::ctor(
+                        sc.bootstrap.clone(),
+                        sc.protocol,
+                        sc.verify_certs.clone(),
+                        sc.cert.clone(),
+                        sc.key.clone(),
+                        sc.ca_certs.clone(),
+                    )
+                    .ok()
+                })
+                .and_then(|kc| {
+                    Some(BrokerPool::new(
+                        Arc::new(kc),
+                        Duration::from_secs(30),
+                        "kafka-tool",
+                    ))
+                })
+                .map(|mut broker_pool| {
+                    let broker_pools = self.broker_pools.clone();
+                    tokio::spawn(async move {
+                        match broker_pool.init().await {
+                            Ok(_) => {
+                                info!("Successfully connected");
+                                if let Some(mdr) = broker_pool.metadata() {
+                                    let brokers = mdr
+                                        .brokers
+                                        .iter()
+                                        .map(|bmd| format!("{}:{}", bmd.host, bmd.port))
+                                        .collect();
+                                    let topics = mdr
+                                        .topics
+                                        .iter()
+                                        .map(|topic| format!("{:?}", topic.name))
+                                        .collect();
+                                    snd.send(Message::FillServersTree(Metadata {
+                                        server_name: sname.clone(),
+                                        brokers,
+                                        topics,
+                                    }));
+                                }
 
-            //                 if let Ok(mut bp) = broker_pools.write() {
-            //                     if let Some(si) = bp.get_mut(&sname) {
-            //                         info!("Already added broker pool in pools: {:?}", &si);
-            //                         // bp.
-            //                         // bp.insert(sname, ServerInfo {
-            //                         //     pool: broker_pool,
-            //                         //     tab_group: si.tab_group,
-            //                         // });
-            //                     }
-            //                 }
-            //             }
-            //             Err(err) => {
-            //                 snd.send(Message::ShowAlert(format!(
-            //                     "Error connecting: {:?}",
-            //                     err
-            //                 )));
-            //             }
-            //         }
-            //     });
-            // });
+                                if let Ok(mut bp) = broker_pools.write() {
+                                    if let Some(si) = bp.get_mut(&sname) {
+                                        info!("Already added broker pool in pools: {:?}", &si);
+                                        let tab_group = si.tab_group.clone();
+                                        bp.insert(
+                                            sname,
+                                            ServerInfo {
+                                                pool: broker_pool,
+                                                tab_group,
+                                            },
+                                        );
+                                    }
+                                }
+                            }
+                            Err(err) => {
+                                snd.send(Message::ShowAlert(format!(
+                                    "Error connecting: {:?}",
+                                    err
+                                )));
+                            }
+                        }
+                    });
+                });
         }
     }
 }
